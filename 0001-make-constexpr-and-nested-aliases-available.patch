@@ -1,0 +1,88 @@
+From 57ad22a1a1dbad928c8a5f978e472ada1578b4b6 Mon Sep 17 00:00:00 2001
+From: Christian Reinbold <dev@creinbold.de>
+Date: Sat, 1 Nov 2025 14:19:48 +0100
+Subject: [PATCH] make constexpr and nested aliases available
+
+---
+ tools/clang/include/clang/Basic/TokenKinds.def | 2 +-
+ tools/clang/lib/Parse/ParseDecl.cpp            | 5 ++++-
+ tools/clang/lib/SPIRV/DeclResultIdMapper.cpp   | 6 +++++-
+ tools/clang/lib/SPIRV/SpirvEmitter.cpp         | 9 +++++----
+ 4 files changed, 15 insertions(+), 7 deletions(-)
+
+diff --git a/tools/clang/include/clang/Basic/TokenKinds.def b/tools/clang/include/clang/Basic/TokenKinds.def
+index 2267b12b7..7326f2d92 100644
+--- a/tools/clang/include/clang/Basic/TokenKinds.def
++++ b/tools/clang/include/clang/Basic/TokenKinds.def
+@@ -345,7 +345,7 @@ CXX11_KEYWORD(alignas               , 0)
+ CXX11_KEYWORD(alignof               , 0)
+ CXX11_KEYWORD(char16_t              , KEYNOMS18)
+ CXX11_KEYWORD(char32_t              , KEYNOMS18)
+-CXX11_KEYWORD(constexpr             , 0)
++CXX11_KEYWORD(constexpr             , KEYHLSL)
+ CXX11_KEYWORD(decltype              , 0)
+ CXX11_KEYWORD(noexcept              , 0)
+ CXX11_KEYWORD(nullptr               , 0)
+diff --git a/tools/clang/lib/Parse/ParseDecl.cpp b/tools/clang/lib/Parse/ParseDecl.cpp
+index 4ca80fcec..aa7165268 100644
+--- a/tools/clang/lib/Parse/ParseDecl.cpp
++++ b/tools/clang/lib/Parse/ParseDecl.cpp
+@@ -3989,7 +3989,10 @@ HLSLReservedKeyword:
+ 
+     // constexpr
+     case tok::kw_constexpr:
+-      if (getLangOpts().HLSL) { goto HLSLReservedKeyword; } // HLSL Change - reserved for HLSL
++      // We want the constexpr keyword available for using constexpr functions
++      // to initialize static const members.
++
++      // if (getLangOpts().HLSL) { goto HLSLReservedKeyword; }
+       isInvalid = DS.SetConstexprSpec(Loc, PrevSpec, DiagID);
+       break;
+ 
+diff --git a/tools/clang/lib/SPIRV/DeclResultIdMapper.cpp b/tools/clang/lib/SPIRV/DeclResultIdMapper.cpp
+index fd0fa8a3d..d25471f85 100644
+--- a/tools/clang/lib/SPIRV/DeclResultIdMapper.cpp
++++ b/tools/clang/lib/SPIRV/DeclResultIdMapper.cpp
+@@ -4814,7 +4814,11 @@ SpirvVariable *DeclResultIdMapper::createRayTracingNVStageVar(
+ 
+ void DeclResultIdMapper::tryToCreateImplicitConstVar(const ValueDecl *decl) {
+   const VarDecl *varDecl = dyn_cast<VarDecl>(decl);
+-  if (!varDecl || !varDecl->isImplicit())
++  // Make sure to initialize static const members here. Since evaluateValue()
++  // also seems to handle constexpr members in templated and nested types, this
++  // change seems to be enough to support some basic metaprogramming idioms.
++  bool isStatic = varDecl->isStaticDataMember() && varDecl->hasInit();
++  if (!varDecl || !(varDecl->isImplicit() || isStatic))
+     return;
+ 
+   APValue *val = varDecl->evaluateValue();
+diff --git a/tools/clang/lib/SPIRV/SpirvEmitter.cpp b/tools/clang/lib/SPIRV/SpirvEmitter.cpp
+index 9addb6d22..43b4f0e06 100644
+--- a/tools/clang/lib/SPIRV/SpirvEmitter.cpp
++++ b/tools/clang/lib/SPIRV/SpirvEmitter.cpp
+@@ -1038,6 +1038,10 @@ void SpirvEmitter::doDecl(const Decl *decl) {
+     declIdMapper.recordsSpirvTypeAlias(decl);
+   } else if (isa<FunctionTemplateDecl>(decl)) {
+     // nothing to do.
++  } else if (isa<TypeAliasDecl>(decl)) {
++    // nothing to do.
++  } else if (isa<TypeAliasTemplateDecl>(decl)) {
++    // nothing to do.
+   } else if (isa<UsingDecl>(decl)) {
+     // nothing to do.
+   } else if (isa<UsingDirectiveDecl>(decl)) {
+@@ -1820,10 +1824,7 @@ void SpirvEmitter::doRecordDecl(const RecordDecl *recordDecl) {
+   // RecordDecl. For those defined in the translation unit,
+   // their VarDecls do not have initializer.
+   for (auto *subDecl : recordDecl->decls()) {
+-    if (auto *varDecl = dyn_cast<VarDecl>(subDecl)) {
+-      if (varDecl->isStaticDataMember() && varDecl->hasInit())
+-        doVarDecl(varDecl);
+-    } else if (auto *enumDecl = dyn_cast<EnumDecl>(subDecl)) {
++    if (auto *enumDecl = dyn_cast<EnumDecl>(subDecl)) {
+       doEnumDecl(enumDecl);
+     } else if (auto recordDecl = dyn_cast<RecordDecl>(subDecl)) {
+       doRecordDecl(recordDecl);
+-- 
+2.51.0.windows.2
+
